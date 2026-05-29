@@ -691,11 +691,22 @@ fn validate_amount_limits(env: &Env, min_amount: u64, max_amount: u64) {
     }
 }
 
-/// Panic with [`ErrorCode::ValidationError`] when `code` is empty or longer
-/// than 12 characters (the Stellar maximum asset-code length).
+/// Panic with [`ErrorCode::InvalidAssetCode`] when `code` is empty, longer
+/// than 12 characters, or contains non-alphanumeric characters.
 fn validate_currency_code(env: &Env, code: &String) {
-    if code.len() == 0 || code.len() > 12 {
-        panic_with_error!(env, ErrorCode::ValidationError);
+    let len = code.len();
+    if len == 0 || len > 12 {
+        panic_with_error!(env, ErrorCode::InvalidAssetCode);
+    }
+    // Soroban String: iterate bytes and check ASCII alphanumeric
+    let bytes = code.to_xdr(env);
+    // XDR-encoded string has a 4-byte length prefix; skip it
+    let n = bytes.len() as usize;
+    for i in 4..n {
+        let b = bytes.get(i as u32).unwrap_or(0);
+        if !b.is_ascii_alphanumeric() {
+            panic_with_error!(env, ErrorCode::InvalidAssetCode);
+        }
     }
 }
 
@@ -2002,6 +2013,8 @@ impl AnchorKitContract {
         valid_until: u64,
     ) -> u64 {
         anchor.require_auth();
+        validate_currency_code(&env, &base_asset);
+        validate_currency_code(&env, &quote_asset);
         validate_fee_percent(&env, fee_percentage);
         validate_amount_limits(&env, minimum_amount, maximum_amount);
         let inst = env.storage().instance();
@@ -2630,6 +2643,8 @@ impl AnchorKitContract {
     }
 
     pub fn route_transaction(env: Env, options: RoutingOptions) -> Quote {
+        validate_currency_code(&env, &options.request.base_asset);
+        validate_currency_code(&env, &options.request.quote_asset);
         let now = env.ledger().timestamp();
         let list_key = make_storage_key(&env, &[b"ANCHLIST"]);
         let anchors: Vec<Address> = env.storage().persistent()

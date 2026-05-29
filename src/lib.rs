@@ -66,6 +66,7 @@
 //!     clawback_enabled: None,
 //!     stellar_memo: None,
 //!     stellar_memo_type: None,
+//!     asset_code: None,
 //! };
 //! let deposit = initiate_deposit(raw).expect("invalid deposit response");
 //! println!("Transaction ID: {}", deposit.transaction_id);
@@ -118,6 +119,7 @@ pub mod stellar_toml;
 
 pub use domain_validator::validate_anchor_domain;
 pub use errors::{AnchorKitError, ErrorCode};
+pub use errors::normalize_asset_code;
 pub use stellar_toml::{ParsedCurrency, ParsedStellarToml, parse_stellar_toml, fetch_stellar_toml_url};
 
 /// Backward-compatible alias. Prefer [`AnchorKitError`] for new code.
