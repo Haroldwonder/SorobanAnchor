@@ -82,11 +82,11 @@ pub enum ErrorCode {
     IllegalTransition         = 24,
     SessionExpired            = 25,
     SessionClosed             = 26,
-    UnsupportedCapabilityVersion = 27,
+    UnsupportedCapabilityVersion = 29,
 
-    // Session / routing errors (27–30)
-    SessionOperationLimitExceeded = 27,
-    InvalidWeights                = 28,
+    // Session / routing errors (30–31)
+    SessionOperationLimitExceeded = 30,
+    InvalidWeights                = 31,
 
     // Cache errors (48–49)
     CacheExpired              = 48,
@@ -146,6 +146,7 @@ impl ErrorCode {
             ErrorCode::IllegalTransition         => "Illegal transaction state transition",
             ErrorCode::SessionExpired            => "Session has expired",
             ErrorCode::SessionClosed                  => "Session is closed",
+            ErrorCode::UnsupportedCapabilityVersion    => "Service capability version is unsupported",
             ErrorCode::SessionOperationLimitExceeded   => "Session operation limit exceeded",
             ErrorCode::InvalidWeights                  => "Routing weights must sum to 1.0",
             ErrorCode::CacheExpired              => "Cache entry has expired",
