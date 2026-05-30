@@ -151,7 +151,7 @@ pub use sep24::{
     InteractiveDepositResponse, InteractiveWithdrawalResponse, Sep24TransactionStatusResponse,
     RawInteractiveDepositResponse, RawInteractiveWithdrawalResponse, RawSep24TransactionResponse,
 };
-pub use contract::{AnchorKitContract, EndpointUpdated, CacheConfig};
+pub use contract::{AnchorKitContract, EndpointUpdated, CacheConfig, AdminRole, KycStatus};
 pub use transaction_state_tracker::{TransactionState, TransactionStateRecord, RecoveryMetadata};
 pub use transaction_state_tracker::{StorageBudgetMonitor, TransactionStateTracker};
 pub mod streaming_monitor;

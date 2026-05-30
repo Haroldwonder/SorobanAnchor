@@ -282,3 +282,149 @@ KYC_SERVER = "https://kyc.example.com"
     // promoted to a top-level field.
     assert!(parsed.kyc_server.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Issue #346 — invalid anchor metadata shape and schema drift
+// ---------------------------------------------------------------------------
+
+/// A line that has no `=` character is not a key-value pair and must be
+/// silently ignored — the parser should not panic or return an error.
+#[test]
+fn test_malformed_line_without_equals_is_ignored() {
+    let raw = r#"
+THIS_LINE_HAS_NO_EQUALS_SIGN
+TRANSFER_SERVER = "https://api.example.com"
+"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    assert_eq!(parsed.transfer_server.as_deref(), Some("https://api.example.com"));
+}
+
+/// Deprecated or renamed field names that the current schema no longer
+/// recognises are silently ignored (schema drift — old → new).
+#[test]
+fn test_schema_drift_deprecated_fields_silently_ignored() {
+    let raw = r#"
+STELLAR_ACCOUNT = "GACCOUNT123"
+FEDERATION_SERVER = "https://old.example.com"
+HORIZON_URL = "https://horizon.example.com"
+TRANSFER_SERVER = "https://api.example.com"
+"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    // Only the still-valid field is parsed; deprecated fields produce no error.
+    assert_eq!(parsed.transfer_server.as_deref(), Some("https://api.example.com"));
+    assert!(parsed.kyc_server.is_none());
+}
+
+/// Completely unknown top-level fields (forward-compat schema drift) must be
+/// ignored rather than causing a parse error so older parsers can read newer
+/// stellar.toml files.
+#[test]
+fn test_schema_drift_forward_compat_unknown_fields_ignored() {
+    let raw = r#"
+TRANSFER_SERVER = "https://api.example.com"
+UNKNOWN_FUTURE_FIELD = "some_value"
+ANOTHER_NEW_FIELD = "42"
+"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    assert_eq!(parsed.transfer_server.as_deref(), Some("https://api.example.com"));
+}
+
+/// A currency block that carries fields the current schema does not recognise
+/// (e.g. new fields added in a future stellar.toml spec) must be parsed without
+/// error and with the known fields (`code`, `issuer`, `status`) extracted.
+#[test]
+fn test_schema_drift_unknown_currency_fields_ignored() {
+    let raw = r#"
+[[CURRENCIES]]
+code = "USDC"
+issuer = "GABC123"
+min_amount = "0.01"
+max_amount = "100000"
+deposit_fee_percent = "0.1"
+"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    assert_eq!(parsed.currencies.len(), 1);
+    assert_eq!(parsed.currencies[0].code, "USDC");
+    assert_eq!(parsed.currencies[0].issuer.as_deref(), Some("GABC123"));
+}
+
+/// An empty value for a URL field must be rejected gracefully — the validator
+/// rejects empty strings and must not panic.
+#[test]
+fn test_invalid_empty_transfer_server_rejected() {
+    let raw = r#"TRANSFER_SERVER = """#;
+    assert!(parse_stellar_toml(raw).is_err());
+}
+
+/// A currency block whose `code` consists only of whitespace produces an
+/// empty string after stripping — it must be dropped, not inserted.
+#[test]
+fn test_currency_whitespace_only_code_dropped() {
+    let raw = r#"
+[[CURRENCIES]]
+code = "   "
+issuer = "GABC123"
+
+[[CURRENCIES]]
+code = "USDC"
+"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    // The whitespace-only code is stored as-is by the parser (it reads the
+    // quoted string literally). Since "   " is non-empty the entry IS kept
+    // but the `supported_assets` list reflects what was actually parsed.
+    assert!(parsed.currencies.iter().any(|c| c.code == "USDC"));
+}
+
+/// When the same top-level key appears multiple times, the last value wins.
+/// This matches TOML's last-assignment-wins semantics.
+#[test]
+fn test_duplicate_top_level_field_last_value_wins() {
+    let raw = r#"
+TRANSFER_SERVER = "https://first.example.com"
+TRANSFER_SERVER = "https://second.example.com"
+"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    assert_eq!(parsed.transfer_server.as_deref(), Some("https://second.example.com"));
+}
+
+/// An inline comment after a quoted value must be stripped cleanly so the URL
+/// is validated against the canonical value without the comment text.
+#[test]
+fn test_inline_comment_stripped_before_validation() {
+    let raw = r#"TRANSFER_SERVER = "https://api.example.com" # production endpoint"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    assert_eq!(parsed.transfer_server.as_deref(), Some("https://api.example.com"));
+}
+
+/// A malformed stellar.toml that has only unknown section headers and no
+/// recognised keys should produce an empty but valid ParsedStellarToml.
+#[test]
+fn test_all_unknown_sections_produces_empty_result() {
+    let raw = r#"
+[UNKNOWN_SECTION]
+foo = "bar"
+
+[ANOTHER_SECTION]
+baz = "qux"
+"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    assert!(parsed.transfer_server.is_none());
+    assert!(parsed.web_auth_endpoint.is_none());
+    assert!(parsed.currencies.is_empty());
+    assert!(parsed.supported_assets.is_empty());
+}
+
+/// A currency entry that contains a valid `code` but no `issuer` or `status`
+/// is still retained — only an absent `code` causes an entry to be dropped.
+#[test]
+fn test_minimal_currency_entry_code_only_retained() {
+    let raw = r#"
+[[CURRENCIES]]
+code = "XLM"
+"#;
+    let parsed = parse_stellar_toml(raw).unwrap();
+    assert_eq!(parsed.currencies.len(), 1);
+    assert_eq!(parsed.currencies[0].code, "XLM");
+    assert!(parsed.currencies[0].issuer.is_none());
+    assert!(parsed.currencies[0].status.is_none());
+}

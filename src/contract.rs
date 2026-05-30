@@ -157,6 +157,46 @@ pub const SERVICE_WITHDRAWALS: u32 = 2;
 pub const SERVICE_QUOTES: u32 = 3;
 pub const SERVICE_KYC: u32 = 4;
 
+// ---------------------------------------------------------------------------
+// #344 — Admin permission model
+//
+// Every admin-gated method maps to one of the categories below. The primary
+// admin (set during `initialize`) has implicit access to ALL categories.
+// Additional addresses may be granted category-scoped roles via `grant_role`.
+//
+// | Category / Role   | Protected operations                                    |
+// |-------------------|---------------------------------------------------------|
+// | (primary admin)   | initialize, upgrade, migrate, set_cache_config,         |
+// |                   | set_sep10_jwt_verifying_key, rotate_sep10_key,          |
+// |                   | set_jwt_max_len, set_jwt_skew, set_rate_limit_config,   |
+// |                   | set_anchor_metadata, reactivate_anchor                  |
+// | KycAdmin          | approve_kyc, reject_kyc                                 |
+// | AttestorAdmin     | register_attestor, revoke_attestor,                     |
+// |                   | register_attestor_with_session,                         |
+// |                   | revoke_attestor_with_session                            |
+// | CacheAdmin        | cache_metadata, cache_metadata_swr, force_refresh_metadata,|
+// |                   | refresh_metadata_cache, refresh_metadata_cache_swr,     |
+// |                   | cache_capabilities, refresh_capabilities_cache          |
+// ---------------------------------------------------------------------------
+
+/// Role-based access control for delegatable admin operations (#345).
+///
+/// Addresses may be granted a role by the primary admin via [`AnchorKitContract::grant_role`].
+/// Role holders can call the operations associated with their role without being
+/// the primary admin. The primary admin always passes any role check regardless
+/// of explicit grants.
+#[contracttype]
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[repr(u32)]
+pub enum AdminRole {
+    /// May call `approve_kyc` and `reject_kyc`.
+    KycAdmin      = 0,
+    /// May call `register_attestor`, `revoke_attestor`, and their session variants.
+    AttestorAdmin = 1,
+    /// May call all `cache_*` and `refresh_*_cache*` methods.
+    CacheAdmin    = 2,
+}
+
 /// Current on-chain service-capability schema version (#239).
 ///
 /// This constant gates which service codes the contract recognises and is the
@@ -681,6 +721,14 @@ fn xdr_to_vec(b: &Bytes) -> alloc::vec::Vec<u8> {
     v
 }
 
+/// Storage key for a specific `(role, grantee)` pair.
+fn role_key(env: &Env, role: AdminRole, grantee: &Address) -> BytesN<32> {
+    let xdr = grantee.clone().to_xdr(env);
+    let raw = xdr_to_vec(&xdr);
+    let role_byte = [role as u32 as u8];
+    make_storage_key(env, &[b"ROLESET", &role_byte, &raw])
+}
+
 fn anchor_meta_opt(env: &Env, anchor: &Address) -> Option<RoutingAnchorMeta> {
     env.storage().persistent().get(&anchor_meta_key(env, anchor))
 }
@@ -777,6 +825,46 @@ impl AnchorKitContract {
             .instance()
             .get::<_, Address>(&admin_key(&env))
             .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized))
+    }
+
+    // -----------------------------------------------------------------------
+    // Role-based access control (#345)
+    // -----------------------------------------------------------------------
+
+    /// Grant `role` to `grantee`. Only the primary admin may call this.
+    ///
+    /// After this call `grantee` may invoke the operations protected by `role`
+    /// without being the primary admin.  Granting a role that is already held
+    /// is a no-op.
+    pub fn grant_role(env: Env, grantee: Address, role: AdminRole) {
+        Self::require_admin(&env);
+        let key = role_key(&env, role, &grantee);
+        env.storage().persistent().set(&key, &true);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_TTL, PERSISTENT_TTL);
+        env.events().publish(
+            (symbol_short!("role"), symbol_short!("granted"), grantee),
+            role as u32,
+        );
+    }
+
+    /// Revoke `role` from `grantee`. Only the primary admin may call this.
+    ///
+    /// Revoking a role that was never granted is a no-op.
+    pub fn revoke_role(env: Env, grantee: Address, role: AdminRole) {
+        Self::require_admin(&env);
+        let key = role_key(&env, role, &grantee);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().remove(&key);
+        }
+        env.events().publish(
+            (symbol_short!("role"), symbol_short!("revoked"), grantee),
+            role as u32,
+        );
+    }
+
+    /// Returns `true` if `address` holds `role` or is the primary admin.
+    pub fn has_role(env: Env, address: Address, role: AdminRole) -> bool {
+        Self::has_role_internal(&env, &address, role)
     }
 
     // -----------------------------------------------------------------------
@@ -1886,8 +1974,11 @@ impl AnchorKitContract {
         );
     }
 
-    pub fn approve_kyc(env: Env, subject: Address) {
-        Self::require_admin(&env);
+    /// Approve a pending KYC record.
+    ///
+    /// `operator` must be the primary admin or hold [`AdminRole::KycAdmin`].
+    pub fn approve_kyc(env: Env, operator: Address, subject: Address) {
+        Self::require_admin_or_role(&env, &operator, AdminRole::KycAdmin);
         let now = env.ledger().timestamp();
         let key = kyc_record_key(&env, &subject);
         let mut record: KycRecord = env.storage().persistent().get(&key)
@@ -1908,8 +1999,11 @@ impl AnchorKitContract {
         );
     }
 
-    pub fn reject_kyc(env: Env, subject: Address, reason_hash: Bytes) {
-        Self::require_admin(&env);
+    /// Reject a pending KYC record.
+    ///
+    /// `operator` must be the primary admin or hold [`AdminRole::KycAdmin`].
+    pub fn reject_kyc(env: Env, operator: Address, subject: Address, reason_hash: Bytes) {
+        Self::require_admin_or_role(&env, &operator, AdminRole::KycAdmin);
         let now = env.ledger().timestamp();
         let key = kyc_record_key(&env, &subject);
         let mut record: KycRecord = env.storage().persistent().get(&key)
@@ -2232,8 +2326,11 @@ impl AnchorKitContract {
         id
     }
 
-    pub fn register_attestor_with_session(env: Env, session_id: u64, attestor: Address, public_key: BytesN<32>) {
-        Self::require_admin(&env);
+    /// Register an attestor within a session.
+    ///
+    /// `operator` must be the primary admin or hold [`AdminRole::AttestorAdmin`].
+    pub fn register_attestor_with_session(env: Env, operator: Address, session_id: u64, attestor: Address, public_key: BytesN<32>) {
+        Self::require_admin_or_role(&env, &operator, AdminRole::AttestorAdmin);
         Self::require_session_open(&env, session_id);
         let xdr = attestor.clone().to_xdr(&env);
         let raw = xdr_to_vec(&xdr);
@@ -2258,12 +2355,9 @@ impl AnchorKitContract {
         inst.set(&acnt_key, &(log_id + 1));
         inst.extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
 
-        let admin: Address = inst
-            .get::<_, Address>(&admin_key(&env))
-            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized));
         let now = env.ledger().timestamp();
         let audit = AuditLog {
-            log_id, session_id, actor: admin,
+            log_id, session_id, actor: operator.clone(),
             operation: OperationContext {
                 session_id, operation_index: op_index,
                 operation_type: String::from_str(&env, "register"),
@@ -2289,8 +2383,11 @@ impl AnchorKitContract {
         );
     }
 
-    pub fn revoke_attestor_with_session(env: Env, session_id: u64, attestor: Address) {
-        Self::require_admin(&env);
+    /// Revoke an attestor within a session.
+    ///
+    /// `operator` must be the primary admin or hold [`AdminRole::AttestorAdmin`].
+    pub fn revoke_attestor_with_session(env: Env, operator: Address, session_id: u64, attestor: Address) {
+        Self::require_admin_or_role(&env, &operator, AdminRole::AttestorAdmin);
         Self::require_session_open(&env, session_id);
         let xdr = attestor.clone().to_xdr(&env);
         let raw = xdr_to_vec(&xdr);
@@ -2313,12 +2410,9 @@ impl AnchorKitContract {
         inst.set(&acnt_key, &(log_id + 1));
         inst.extend_ttl(INSTANCE_TTL, INSTANCE_TTL);
 
-        let admin: Address = inst
-            .get::<_, Address>(&admin_key(&env))
-            .unwrap_or_else(|| panic_with_error!(&env, ErrorCode::NotInitialized));
         let now = env.ledger().timestamp();
         let audit = AuditLog {
-            log_id, session_id, actor: admin,
+            log_id, session_id, actor: operator.clone(),
             operation: OperationContext {
                 session_id, operation_index: op_index,
                 operation_type: String::from_str(&env, "revoke"),
@@ -3201,6 +3295,32 @@ impl AnchorKitContract {
             .get::<_, Address>(&admin_key(env))
             .unwrap_or_else(|| panic_with_error!(env, ErrorCode::NotInitialized));
         admin.require_auth();
+    }
+
+    /// Returns `true` if `address` holds `role` OR is the primary admin.
+    fn has_role_internal(env: &Env, address: &Address, role: AdminRole) -> bool {
+        // Primary admin implicitly has every role.
+        if let Some(admin) = env.storage().instance().get::<_, Address>(&admin_key(env)) {
+            if *address == admin {
+                return true;
+            }
+        }
+        env.storage()
+            .persistent()
+            .get::<_, bool>(&role_key(env, role, address))
+            .unwrap_or(false)
+    }
+
+    /// Require that `caller` is either the primary admin or holds `role`.
+    ///
+    /// Panics with `NotInitialized` if the contract has not been initialised,
+    /// or with `Unauthorized` if the caller has neither admin status nor the
+    /// required role.
+    fn require_admin_or_role(env: &Env, caller: &Address, role: AdminRole) {
+        if !Self::has_role_internal(env, caller, role) {
+            panic_with_error!(env, ErrorCode::Unauthorized);
+        }
+        caller.require_auth();
     }
 
     /// Validate freshly-fetched anchor metadata before it is written to the
