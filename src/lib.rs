@@ -175,6 +175,7 @@ pub use config::{load_runtime_config_file, parse_runtime_config_str, ConfigForma
 pub use response_validator::{
     validate_anchor_info_response, validate_deposit_response, validate_quote_response,
     validate_sep38_quote_response, validate_withdraw_response, validate_stellar_asset,
+    validate_stellar_account_id, normalize_stellar_account_id,
     AnchorInfoResponse, DepositResponse as ValidatorDepositResponse, QuoteResponse,
     Sep38QuoteResponse, WithdrawResponse,
 };
@@ -196,8 +197,18 @@ pub use sep24::{
     InteractiveDepositResponse, InteractiveWithdrawalResponse, Sep24TransactionStatusResponse,
     RawInteractiveDepositResponse, RawInteractiveWithdrawalResponse, RawSep24TransactionResponse,
 };
-#[cfg(not(feature = "wasm"))]
+pub use contract::{AnchorKitContract, EndpointUpdated, CacheConfig};
+pub use contract::{HealthStatus, MetadataFreshnessReport, RateLimiterHealth};
+pub use transaction_state_tracker::{TransactionState, TransactionStateRecord, RecoveryMetadata};
+pub use transaction_state_tracker::{StorageBudgetMonitor, TransactionStateTracker};
+pub mod streaming_monitor;
 pub use streaming_monitor::{StreamingTransactionMonitor, TransactionStatusUpdate};
 
 #[cfg(test)]
 mod stellar_toml_tests;
+
+#[cfg(test)]
+mod ledger_boundary_tests;
+
+#[cfg(test)]
+mod boundary_test_helpers;
